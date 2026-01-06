@@ -14,6 +14,8 @@ __attributes = {
     'SLat': 'structured_latent',
     'TextConditionedSLat': 'structured_latent',
     'ImageConditionedSLat': 'structured_latent',
+    # [新增] 注册我们的蒸馏 Dataset
+    'SAM3DDistillDataset': 'sam3d_distill_dataset',
 }
 
 __submodules = []
@@ -55,4 +57,5 @@ if __name__ == '__main__':
         TextConditionedSLat,
         ImageConditionedSLat,
     )
+    from .sam3d_distill_dataset import SAM3DDistillDataset
     

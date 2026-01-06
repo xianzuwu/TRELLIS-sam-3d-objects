@@ -75,36 +75,59 @@ fi
 
 # Get system information
 WORKDIR=$(pwd)
-PYTORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
-PLATFORM=$(python -c "import torch; print(('cuda' if torch.version.cuda else ('hip' if torch.version.hip else 'unknown')) if torch.cuda.is_available() else 'cpu')")
-case $PLATFORM in
-    cuda)
-        CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)")
-        CUDA_MAJOR_VERSION=$(echo $CUDA_VERSION | cut -d'.' -f1)
-        CUDA_MINOR_VERSION=$(echo $CUDA_VERSION | cut -d'.' -f2)
-        echo "[SYSTEM] PyTorch Version: $PYTORCH_VERSION, CUDA Version: $CUDA_VERSION"
-        ;;
-    hip)
-        HIP_VERSION=$(python -c "import torch; print(torch.version.hip)")
-        HIP_MAJOR_VERSION=$(echo $HIP_VERSION | cut -d'.' -f1)
-        HIP_MINOR_VERSION=$(echo $HIP_VERSION | cut -d'.' -f2)
-        # Install pytorch 2.4.1 for hip
-        if [ "$PYTORCH_VERSION" != "2.4.1+rocm6.1" ] ; then
-        echo "[SYSTEM] Installing PyTorch 2.4.1 for HIP ($PYTORCH_VERSION -> 2.4.1+rocm6.1)"
-            pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/rocm6.1 --user
-            mkdir -p /tmp/extensions
-            sudo cp /opt/rocm/share/amd_smi /tmp/extensions/amd_smi -r
-            cd /tmp/extensions/amd_smi
-            sudo chmod -R 777 .
-            pip install .
-            cd $WORKDIR
-            PYTORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
-        fi
-        echo "[SYSTEM] PyTorch Version: $PYTORCH_VERSION, HIP Version: $HIP_VERSION"
-        ;;
-    *)
-        ;;
-esac
+
+# Check if PyTorch can be imported
+if ! python -c "import torch" 2>/dev/null; then
+    echo "[ERROR] PyTorch cannot be imported. This may be due to:"
+    echo "  1. PyTorch installation is corrupted"
+    echo "  2. Library dependency conflicts (e.g., Intel MKL)"
+    echo "  3. Missing or incompatible system libraries"
+    echo ""
+    echo "To fix this, try:"
+    echo "  1. Reinstall PyTorch: conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=12.1 -c pytorch -c nvidia --force-reinstall"
+    echo "  2. Or reinstall Intel MKL: conda install mkl mkl-service -c intel"
+    echo "  3. Or create a fresh environment: conda create -n trellis python=3.10 && conda activate trellis"
+    echo ""
+    echo "Skipping platform detection. Some features may not work."
+    PYTORCH_VERSION=""
+    PLATFORM="unknown"
+    CUDA_VERSION=""
+    CUDA_MAJOR_VERSION=""
+    CUDA_MINOR_VERSION=""
+else
+    PYTORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+    PLATFORM=$(python -c "import torch; print(('cuda' if torch.version.cuda else ('hip' if torch.version.hip else 'unknown')) if torch.cuda.is_available() else 'cpu')" 2>/dev/null)
+    
+    case $PLATFORM in
+        cuda)
+            CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null)
+            CUDA_MAJOR_VERSION=$(echo $CUDA_VERSION | cut -d'.' -f1)
+            CUDA_MINOR_VERSION=$(echo $CUDA_VERSION | cut -d'.' -f2)
+            echo "[SYSTEM] PyTorch Version: $PYTORCH_VERSION, CUDA Version: $CUDA_VERSION"
+            ;;
+        hip)
+            HIP_VERSION=$(python -c "import torch; print(torch.version.hip)" 2>/dev/null)
+            HIP_MAJOR_VERSION=$(echo $HIP_VERSION | cut -d'.' -f1)
+            HIP_MINOR_VERSION=$(echo $HIP_VERSION | cut -d'.' -f2)
+            # Install pytorch 2.4.1 for hip
+            if [ "$PYTORCH_VERSION" != "2.4.1+rocm6.1" ] ; then
+            echo "[SYSTEM] Installing PyTorch 2.4.1 for HIP ($PYTORCH_VERSION -> 2.4.1+rocm6.1)"
+                pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/rocm6.1 --user
+                mkdir -p /tmp/extensions
+                sudo cp /opt/rocm/share/amd_smi /tmp/extensions/amd_smi -r
+                cd /tmp/extensions/amd_smi
+                sudo chmod -R 777 .
+                pip install .
+                cd $WORKDIR
+                PYTORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+            fi
+            echo "[SYSTEM] PyTorch Version: $PYTORCH_VERSION, HIP Version: $HIP_VERSION"
+            ;;
+        *)
+            echo "[SYSTEM] PyTorch Version: $PYTORCH_VERSION, Platform: $PLATFORM"
+            ;;
+    esac
+fi
 
 if [ "$BASIC" = true ] ; then
     pip install pillow imageio imageio-ffmpeg tqdm easydict opencv-python-headless scipy ninja rembg onnxruntime trimesh open3d xatlas pyvista pymeshfix igraph transformers

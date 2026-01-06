@@ -17,6 +17,8 @@ __attributes = {
     
     'SLatFlowModel': 'structured_latent_flow',
     'ElasticSLatFlowModel': 'structured_latent_flow',
+    # [新增] 注册 SAM3D Adapter
+    'SAM3DStructureFlowAdapter': 'sam3d_adapter',
 }
 
 __submodules = []
@@ -94,3 +96,4 @@ if __name__ == '__main__':
         SLatFlowModel,
         ElasticSLatFlowModel,
     )
+    from .sam3d_adapter import SAM3DStructureFlowAdapter

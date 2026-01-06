@@ -18,6 +18,8 @@ __attributes = {
     'SparseFlowMatchingCFGTrainer': 'flow_matching.sparse_flow_matching',
     'TextConditionedSparseFlowMatchingCFGTrainer': 'flow_matching.sparse_flow_matching',
     'ImageConditionedSparseFlowMatchingCFGTrainer': 'flow_matching.sparse_flow_matching',
+
+    'SAM3DFlowMatchingTrainer': 'flow_matching.sam3d_trainer',
 }
 
 __submodules = []
@@ -61,3 +63,4 @@ if __name__ == '__main__':
         TextConditionedSparseFlowMatchingCFGTrainer,
         ImageConditionedSparseFlowMatchingCFGTrainer,
     )
+    from .flow_matching.sam3d_trainer import SAM3DFlowMatchingTrainer

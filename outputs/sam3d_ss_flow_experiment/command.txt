@@ -1,0 +1,1 @@
+python train.py --config configs/generation/sam3d_ss_flow.json --output_dir outputs/sam3d_ss_flow_experiment
