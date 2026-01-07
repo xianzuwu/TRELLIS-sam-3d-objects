@@ -135,13 +135,17 @@ class Trainer:
             self.dataset,
             shuffle=True,
         )
+        # Limit num_workers to prevent "Too many open files" error
+        # Cap at 16 workers to avoid file descriptor exhaustion
+        calculated_workers = int(np.ceil(os.cpu_count() / torch.cuda.device_count()))
+        num_workers = min(calculated_workers, 16)
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size_per_gpu,
-            num_workers=int(np.ceil(os.cpu_count() / torch.cuda.device_count())),
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=True,
+            persistent_workers=True if num_workers > 0 else False,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
             sampler=self.data_sampler,
         )
@@ -401,22 +405,50 @@ class Trainer:
         while self.step < self.max_steps:
             time_start = time.time()
 
+            # Add progress indicator for first few steps
+            if self.is_master and self.step < 10:
+                print(f'[Step {self.step}] Loading data...', flush=True)
+            
             data_list = self.load_data()
+            
+            if self.is_master and self.step < 10:
+                print(f'[Step {self.step}] Running training step...', flush=True)
+            
             step_log = self.run_step(data_list)
 
             time_end = time.time()
             time_elapsed += time_end - time_start
 
             self.step += 1
+            
+            # Print loss for first 1000 steps (every 20 steps after step 10)
+            should_print_loss = (self.is_master and step_log is not None and 
+                                (self.step <= 10 or (self.step <= 1000 and self.step % 20 == 0)))
+            if should_print_loss:
+                loss_info = step_log.get('loss', {})
+                if isinstance(loss_info, dict):
+                    # Filter out non-numeric values and format
+                    loss_items = [(k, v) for k, v in loss_info.items() if isinstance(v, (int, float, np.number))]
+                    if loss_items:
+                        loss_str = ', '.join([f'{k}: {v:.6f}' for k, v in loss_items])
+                    else:
+                        loss_str = 'loss: N/A'
+                else:
+                    loss_str = f'loss: {loss_info:.6f}' if isinstance(loss_info, (int, float, np.number)) else f'loss: {loss_info}'
+                print(f'[Step {self.step}] {loss_str} (time: {time_end - time_start:.2f}s)', flush=True)
 
             # Print progress
-            if self.is_master and self.step % self.i_print == 0:
-                speed = self.i_print / (time_elapsed - time_last_print) * 3600
+            # For first 1000 steps, print every 20 steps; otherwise use i_print
+            print_interval = 20 if self.step <= 1000 else self.i_print
+            if self.is_master and self.step % print_interval == 0:
+                # Calculate speed based on actual interval used
+                steps_since_last = print_interval if time_last_print > 0 else self.step
+                speed = steps_since_last / (time_elapsed - time_last_print) * 3600 if time_last_print > 0 else 0
                 columns = [
                     f'Step: {self.step}/{self.max_steps} ({self.step / self.max_steps * 100:.2f}%)',
                     f'Elapsed: {time_elapsed / 3600:.2f} h',
                     f'Speed: {speed:.2f} steps/h',
-                    f'ETA: {(self.max_steps - self.step) / speed:.2f} h',
+                    f'ETA: {(self.max_steps - self.step) / speed:.2f} h' if speed > 0 else 'ETA: N/A',
                 ]
                 print(' | '.join([c.ljust(25) for c in columns]), flush=True)
                 time_last_print = time_elapsed

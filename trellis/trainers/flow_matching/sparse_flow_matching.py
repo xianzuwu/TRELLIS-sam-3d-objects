@@ -62,13 +62,17 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
             shuffle=True,
             batch_size=self.batch_size_per_gpu,
         )
+        # Limit num_workers to prevent "Too many open files" error
+        # Cap at 16 workers to avoid file descriptor exhaustion
+        calculated_workers = int(np.ceil(os.cpu_count() / torch.cuda.device_count()))
+        num_workers = min(calculated_workers, 16)
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size_per_gpu,
-            num_workers=int(np.ceil(os.cpu_count() / torch.cuda.device_count())),
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=True,
+            persistent_workers=True if num_workers > 0 else False,
             collate_fn=functools.partial(self.dataset.collate_fn, split_size=self.batch_split),
             sampler=self.data_sampler,
         )

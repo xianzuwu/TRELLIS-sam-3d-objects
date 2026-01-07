@@ -310,8 +310,15 @@ class MOTMultiHeadSelfAttention(nn.Module):
     def mm_scale_dot_product_attention(self, q, k, v):
         h = {}
         latent_names = list(q.keys())
+        # Determine which protected modalities are actually present in the current tensors.
+        # In some setups, `protect_modality_list` may contain entries (e.g. "shape")
+        # that are not part of the current latent dict, which previously caused KeyError.
+        existing_protected_modalities = [
+            m for m in self.protect_modality_list if m in latent_names
+        ]
+
         # for protected modality, it only attends itself
-        for protect_modality in self.protect_modality_list:
+        for protect_modality in existing_protected_modalities:
             _q = q[protect_modality]
             _k = k[protect_modality]
             _v = v[protect_modality]
@@ -319,18 +326,29 @@ class MOTMultiHeadSelfAttention(nn.Module):
 
         # for the rest it is ok to attend each other and allow gradient
         other_modalities = [
-            n for n in latent_names if n not in self.protect_modality_list
+            n for n in latent_names if n not in existing_protected_modalities
         ]
+
+        # If there are no "other" modalities, we are done (only protected ones exist).
+        if len(other_modalities) == 0:
+            return h
+
         _q, indicies_mapping = self.concatenate_tensor(q, other_modalities)
         o_k, _ = self.concatenate_tensor(k, other_modalities)
         o_v, _ = self.concatenate_tensor(v, other_modalities)
-        # no gradiant flow back to protected modality (e.g. shape)
-        _k, _ = self.concatenate_tensor(k, self.protect_modality_list)
-        _v, _ = self.concatenate_tensor(v, self.protect_modality_list)
-        _k = _k.detach()
-        _v = _v.detach()
-        _k = torch.cat([o_k, _k], dim=1)
-        _v = torch.cat([o_v, _v], dim=1)
+
+        # no gradient flow back to protected modality (e.g. shape)
+        if len(existing_protected_modalities) > 0:
+            _k_protected, _ = self.concatenate_tensor(k, existing_protected_modalities)
+            _v_protected, _ = self.concatenate_tensor(v, existing_protected_modalities)
+            _k_protected = _k_protected.detach()
+            _v_protected = _v_protected.detach()
+            _k = torch.cat([o_k, _k_protected], dim=1)
+            _v = torch.cat([o_v, _v_protected], dim=1)
+        else:
+            # No protected modalities present for this call; just attend over "other" ones.
+            _k, _v = o_k, o_v
+
         h_others = scaled_dot_product_attention(_q, _k, _v)
         h.update(self.unpack_tensors(h_others, indicies_mapping))
 
@@ -361,7 +379,9 @@ class MOTMultiHeadSelfAttention(nn.Module):
                     )
                     h = self.mm_scale_dot_product_attention(q, k, v)
                 else:
-                    raise NotImplementedError
+                    # [CRITICAL FIX] Implement standard attention path without QK Norm
+                    q, k, v = self.unbind_qkv(qkv)
+                    h = self.mm_scale_dot_product_attention(q, k, v)
             elif self.attn_mode == "windowed":
                 raise NotImplementedError("Windowed attention is not yet implemented")
         else:
