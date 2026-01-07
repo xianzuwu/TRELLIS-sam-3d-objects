@@ -1,7 +1,7 @@
 import torch
 import os
 import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 from PIL import Image
 import torch.nn.functional as F
 
@@ -20,14 +20,24 @@ class SAM3DDistillDataset(Dataset):
         self.token_files = [f for f in os.listdir(token_dir) if f.endswith('.pt')]
         self.token_files.sort()
         
-        # [关键修复] 添加 loads 属性供 BalancedResumableSampler 使用
-        # 因为所有样本都是 4096 个点，负载是均衡的，我们全部设为 1
-        self.loads = [1] * len(self.token_files)
+        ## 添加 loads 属性供 BalancedResumableSampler 使用
+        self.loads = np.ones(len(self.token_files), dtype=np.float32)
+        
+        # [关键修复] 添加 value_range 属性
+        # 对于图像数据，范围是 [0, 1]；对于 Latent，虽然 Log Space 范围较广，
+        # 但 TRELLIS 框架通常期望这里定义为 [0, 1] 或 [-1, 1] 以通过初步检查
+        self.value_range = (0.0, 1.0)
         
         print(f"[Dataset] Found {len(self.token_files)} GT token files in {token_dir}.")
 
     def __len__(self):
         return len(self.token_files)
+    
+    # [关键修复] 添加 collate_fn 属性
+    # train.py 内部会调用这个方法来组织 batch
+    @staticmethod
+    def collate_fn(batch):
+        return default_collate(batch)
 
     def get_crop_bbox(self, mask_np):
         """
@@ -43,7 +53,8 @@ class SAM3DDistillDataset(Dataset):
         rmin, rmax = np.where(rows)[0][[0, -1]]
         cmin, cmax = np.where(cols)[0][[0, -1]]
         
-        return cmin, rmin, cmax, rmax
+        # 转换为 Python 原生 int，避免 numpy 标量类型导致 collate 错误
+        return int(cmin), int(rmin), int(cmax), int(rmax)
 
     def preprocess_image_tensor(self, pil_image):
         """
@@ -58,9 +69,14 @@ class SAM3DDistillDataset(Dataset):
         
         # 确保有 Alpha 通道
         if arr.shape[-1] == 3:
-            arr = np.dstack([arr, np.ones_like(arr[..., 0]) * 255])
+            # 使用 float32 类型避免 uint8 溢出和类型问题
+            alpha = np.ones_like(arr[..., 0], dtype=np.float32) * 255.0
+            arr = np.dstack([arr.astype(np.float32), alpha])
+        else:
+            # 如果已经是 RGBA，也转换为 float32
+            arr = arr.astype(np.float32)
             
-        x = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
+        x = torch.from_numpy(arr).permute(2, 0, 1) / 255.0
         img = x[:3, ...] # [3, H, W]
         mask = x[3:4, ...] # [1, H, W]
 
@@ -98,11 +114,20 @@ class SAM3DDistillDataset(Dataset):
         gt_data = torch.load(gt_path, map_location='cpu')
         
         # 移除 Batch 维度
-        shape_token = gt_data['shape'].squeeze(0)
-        rot_token = gt_data['6drotation_normalized'].squeeze(0)
-        trans_token = gt_data['translation'].squeeze(0)
-        scale_token = gt_data['scale'].squeeze(0)
-        t_scale_token = gt_data['translation_scale'].squeeze(0)
+        # 确保所有字段都被正确处理，避免任何 uint8 类型或意外的形状
+        shape_token = gt_data['shape'].squeeze(0).float()  # 确保是 float32
+        rot_token = gt_data['6drotation_normalized'].squeeze(0).float()
+        trans_token = gt_data['translation'].squeeze(0).float()
+        scale_token = gt_data['scale'].squeeze(0).float()
+        # translation_scale 是 (1, 1, 1)，squeeze(0) 后是 (1, 1)，需要确保正确
+        t_scale_token = gt_data['translation_scale'].squeeze(0).float()
+        
+        # 验证所有 token 都是 float32 类型，避免任何类型问题
+        assert shape_token.dtype == torch.float32, f"shape_token dtype is {shape_token.dtype}, expected float32"
+        assert rot_token.dtype == torch.float32, f"rot_token dtype is {rot_token.dtype}, expected float32"
+        assert trans_token.dtype == torch.float32, f"trans_token dtype is {trans_token.dtype}, expected float32"
+        assert scale_token.dtype == torch.float32, f"scale_token dtype is {scale_token.dtype}, expected float32"
+        assert t_scale_token.dtype == torch.float32, f"t_scale_token dtype is {t_scale_token.dtype}, expected float32"
 
         # ==========================================
         # 2. Load Image
@@ -131,23 +156,25 @@ class SAM3DDistillDataset(Dataset):
         # Crop -> Pad to Square -> Resize
         
         # 计算 Mask BBox
-        mask_np = np.array(pil_image)[:, :, 3] > 128 # 阈值 128
+        # 使用 float32 类型避免 uint8 类型问题
+        arr_for_mask = np.array(pil_image).astype(np.float32)
+        mask_np = arr_for_mask[:, :, 3] > 128.0 # 阈值 128，使用 float 比较
         cmin, rmin, cmax, rmax = self.get_crop_bbox(mask_np)
         
         # 添加 10% Padding
         width, height = cmax - cmin, rmax - rmin
         pad = int(max(width, height) * 0.1)
         
-        # 确保不越界
-        cmin = max(0, cmin - pad)
-        rmin = max(0, rmin - pad)
-        cmax = min(pil_image.width, cmax + pad)
-        rmax = min(pil_image.height, rmax + pad)
+        # 确保不越界（确保所有值都是 Python int）
+        cmin = int(max(0, cmin - pad))
+        rmin = int(max(0, rmin - pad))
+        cmax = int(min(pil_image.width, cmax + pad))
+        rmax = int(min(pil_image.height, rmax + pad))
 
         crop_pil = pil_image.crop((cmin, rmin, cmax, rmax))
         local_img_tensor, local_mask_tensor = self.preprocess_image_tensor(crop_pil)
 
-        return {
+        result = {
             # GT
             'x_0': shape_token, 
             '6drotation_normalized': rot_token,
@@ -161,3 +188,26 @@ class SAM3DDistillDataset(Dataset):
             'rgb_image': global_img_tensor,      # [3, 518, 518]
             'rgb_image_mask': global_mask_tensor # [1, 518, 518]
         }
+        
+        # 确保所有值都是 torch.Tensor 类型，避免任何 numpy 数组或意外类型
+        for k, v in result.items():
+            if not isinstance(v, torch.Tensor):
+                raise TypeError(f"Field '{k}' is not a torch.Tensor: {type(v)}")
+            if v.dtype == torch.uint8:
+                raise TypeError(f"Field '{k}' has uint8 dtype, which may cause issues. Shape: {v.shape}")
+        
+        return result
+    
+    def visualize_sample(self, sample):
+        """
+        Visualize a sample for snapshot_dataset.
+        Returns the image tensor for visualization.
+        """
+        # 返回 rgb_image 用于可视化
+        if 'rgb_image' in sample:
+            return sample['rgb_image']
+        elif 'image' in sample:
+            return sample['image']
+        else:
+            # 如果没有图像，返回一个占位符
+            return torch.zeros(3, 518, 518)
