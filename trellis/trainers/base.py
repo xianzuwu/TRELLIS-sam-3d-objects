@@ -208,13 +208,52 @@ class Trainer:
         else:
             save_cfg = [('dataset', vis)]
         for name, image in save_cfg:
-            utils.save_image(
-                image,
-                os.path.join(self.output_dir, 'samples', f'{name}.jpg'),
-                nrow=int(np.sqrt(num_samples)),
-                normalize=True,
-                value_range=self.dataset.value_range,
-            )
+            # 确保 name 是字符串，image 是 Tensor
+            if not isinstance(name, str):
+                name = str(name)
+            if not isinstance(image, torch.Tensor):
+                raise TypeError(f"image must be torch.Tensor, got {type(image)}")
+            
+            # 确保 value_range 是 tuple/list，而不是 Tensor
+            value_range = self.dataset.value_range
+            if isinstance(value_range, torch.Tensor):
+                value_range = tuple(value_range.cpu().tolist())
+            elif not isinstance(value_range, (tuple, list)):
+                value_range = (0.0, 1.0)  # 默认值
+            
+            # 确保 output_dir 是字符串
+            output_dir = str(self.output_dir)
+            
+            # 构建文件路径，确保所有部分都是字符串
+            file_path = os.path.join(output_dir, 'samples', f'{name}.jpg')
+            
+            # 确保 file_path 是字符串类型
+            if not isinstance(file_path, str):
+                file_path = str(file_path)
+            
+            # 确保目录存在
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            try:
+                utils.save_image(
+                    image,
+                        file_path,
+                    nrow=int(np.sqrt(num_samples)),
+                    normalize=True,
+                        value_range=value_range,
+                    )
+            except AttributeError as e:
+                if "'Tensor' object has no attribute 'replace'" in str(e):
+                    # 详细的错误信息
+                    raise AttributeError(
+                        f"Error in save_image: {e}\n"
+                        f"  file_path type: {type(file_path)}, value: {file_path}\n"
+                        f"  image type: {type(image)}, shape: {image.shape if hasattr(image, 'shape') else 'N/A'}\n"
+                        f"  value_range type: {type(value_range)}, value: {value_range}\n"
+                        f"  output_dir type: {type(output_dir)}, value: {output_dir}\n"
+                        f"  name type: {type(name)}, value: {name}"
+                    ) from e
+                raise
 
     @torch.no_grad()
     def snapshot(self, suffix=None, num_samples=64, batch_size=4, verbose=False):

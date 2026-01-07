@@ -202,12 +202,32 @@ class SAM3DDistillDataset(Dataset):
         """
         Visualize a sample for snapshot_dataset.
         Returns the image tensor for visualization.
+        Note: sample is already a batch (from dataloader), so we return the batch tensor directly.
         """
-        # 返回 rgb_image 用于可视化
-        if 'rgb_image' in sample:
-            return sample['rgb_image']
-        elif 'image' in sample:
-            return sample['image']
+        # sample 已经是 batch 数据，直接返回图像 tensor
+        # 确保返回的是 torch.Tensor，形状为 [B, C, H, W]
+        if isinstance(sample, dict):
+            if 'rgb_image' in sample:
+                img = sample['rgb_image']
+            elif 'image' in sample:
+                img = sample['image']
+            else:
+                # 如果没有图像，返回一个占位符 batch
+                batch_size = sample.get('x_0', torch.zeros(1, 4096, 8)).shape[0]
+                img = torch.zeros(batch_size, 3, 518, 518)
         else:
-            # 如果没有图像，返回一个占位符
-            return torch.zeros(3, 518, 518)
+            # 如果不是 dict，假设 sample 本身就是图像 tensor
+            img = sample
+        
+        # 确保是 torch.Tensor 类型
+        if not isinstance(img, torch.Tensor):
+            raise TypeError(f"visualize_sample returned {type(img)}, expected torch.Tensor")
+        
+        # 确保形状正确 [B, C, H, W] 或 [C, H, W]
+        if img.ndim == 3:
+            # 如果是 [C, H, W]，添加 batch 维度
+            img = img.unsqueeze(0)
+        elif img.ndim != 4:
+            raise ValueError(f"visualize_sample returned tensor with shape {img.shape}, expected [B, C, H, W] or [C, H, W]")
+        
+        return img
