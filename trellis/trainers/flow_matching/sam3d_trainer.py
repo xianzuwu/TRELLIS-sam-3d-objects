@@ -18,8 +18,6 @@ class SAM3DFlowMatchingTrainer(SparseFlowMatchingTrainer):
     Trainer for SAM 3D (MOT Architecture).
     """
     
-    # [CRITICAL FIX] 使用 **batch 接收所有关键字参数，将其打包为字典
-    # 之前定义的 (self, batch, ...) 会导致找不到名为 'batch' 的参数而报错
     def training_losses(
         self,
         **batch
@@ -39,14 +37,12 @@ class SAM3DFlowMatchingTrainer(SparseFlowMatchingTrainer):
 
         for key in mappings:
             if key == 'shape':
-                # Dataset 返回的是 'x_0'，这里做一下兼容
                 if 'x_0' in batch: x0_dict['shape'] = batch['x_0']
                 elif 'shape' in batch: x0_dict['shape'] = batch['shape']
             else:
                 if key in batch: x0_dict[key] = batch[key]
 
         # 2. 采样时间 t
-        # 使用 x0_dict 中任意一个 tensor 来获取 batch size 和 device
         ref_tensor = x0_dict['shape'] 
         B = ref_tensor.shape[0]
         t = self.sample_t(B).to(ref_tensor.device).float()
@@ -60,9 +56,7 @@ class SAM3DFlowMatchingTrainer(SparseFlowMatchingTrainer):
             noise = torch.randn_like(v)
             t_expand = t.view(B, *([1] * (v.ndim - 1)))
             
-            # x_t = (1 - (1-sigma)t) * x_0 + t * x_1
             xt_dict[k] = (1 - (1 - sigma_min) * t_expand) * v + t_expand * noise
-            # u_t = x_1 - (1-sigma) * x_0
             target_dict[k] = noise - (1 - sigma_min) * v
 
         # 4. 条件注入
@@ -78,7 +72,15 @@ class SAM3DFlowMatchingTrainer(SparseFlowMatchingTrainer):
         # 6. Loss 计算
         terms = edict()
         total_loss = 0.0
-        weights = {"shape": 1.0, "6drotation_normalized": 1.0, "translation": 1.0, "scale": 1.0, "translation_scale": 1.0}
+        
+        # [CRITICAL] Adjusted weights based on normalized data and paper settings
+        weights = {
+            "shape": 1.0,
+            "6drotation_normalized": 0.1, # Per SAM 3D paper
+            "translation": 1.0,           # Direction is important
+            "scale": 0.1,                 # Object scale
+            "translation_scale": 1.0      # Normalized distance
+        }
         
         current_step = getattr(self, 'step', 0)
 

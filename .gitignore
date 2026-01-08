@@ -396,3 +396,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Training checkpoints (large model files)
+outputs/sam3d_ss_flow_experiment/ckpts/

@@ -43,9 +43,9 @@
                 }
             },
             "max_steps": 10000,
-            "save_interval": 1000,
-            "eval_interval": 1000,
-            "log_interval": 10,
+            "i_save": 1000,
+            "i_sample": 1000,
+            "i_log": 10,
             
             "batch_size": 2
         }
