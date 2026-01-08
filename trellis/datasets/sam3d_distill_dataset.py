@@ -8,13 +8,6 @@ from torchvision import transforms
 from tqdm import tqdm
 
 class SAM3DDistillDataset(Dataset):
-    """
-    Dataset for SAM 3D Distillation Training.
-    Features:
-    - Object-Centric Cropping & Padding.
-    - White Background.
-    - [NEW] Automatic Latent Normalization (Shape & Translation Scale) to N(0,1).
-    """
     def __init__(self, path, token_dir, image_dir, image_size=518):
         self.token_dir = token_dir
         self.image_dir = image_dir
@@ -28,62 +21,62 @@ class SAM3DDistillDataset(Dataset):
         
         print(f"[Dataset] Found {len(self.token_files)} GT token files in {token_dir}.")
         
-        # [CRITICAL] Compute Statistics for Normalization
-        # This ensures inputs to Flow Matching are ~ N(0, 1)
+        # 计算统计量
         self.stats = self._compute_stats()
         
     def _compute_stats(self):
-        """
-        Computes Mean and Std for shape latents and translation_scale.
-        """
-        print("[Dataset] Computing latent statistics for normalization...")
+        print(f"\n[Dataset] ⏳ STATS: Scanning {len(self.token_files)} files to compute Mean/Std...")
         
         shape_accum = []
-        trans_scale_accum = []
+        trans_scale_log_accum = []
         
-        # Limit the number of files to scan if dataset is huge to save time
-        # For < 1000 files, full scan is fast.
-        scan_files = self.token_files[:1000] 
-        
-        for f in tqdm(scan_files, desc="Scanning latents"):
+        # 扫描所有文件（因为你只有28个，这很快）
+        for f in self.token_files:
             gt_path = os.path.join(self.token_dir, f)
             try:
-                # Use weights_only=False to allow loading complex dicts if needed, 
-                # though usually False is safer if trusted. 
-                # Keeping compatibility with previous loader.
                 gt_data = torch.load(gt_path, map_location='cpu', weights_only=False)
                 
-                # Shape
-                shape_accum.append(gt_data['shape'].squeeze(0).float())
+                # 1. Shape Latent
+                s = gt_data['shape'].float()
+                # 调试打印：打印第一个文件的形状，确认是否需要 squeeze
+                if len(shape_accum) == 0:
+                    print(f"[Dataset] DEBUG: First file '{f}' shape tensor size: {s.shape}")
                 
-                # Translation Scale (Log space)
-                ts = gt_data['translation_scale'].squeeze(0).float()
-                trans_scale_accum.append(torch.log(ts + 1e-6))
+                # 展平所有维度，只保留数值分布
+                shape_accum.append(s.flatten())
+                
+                # 2. Translation Scale (Log)
+                ts = gt_data['translation_scale'].float().flatten()
+                ts = torch.clamp(ts, min=1e-4) # 防止 log(0)
+                trans_scale_log_accum.append(torch.log(ts))
+                
             except Exception as e:
-                print(f"Error loading {f}: {e}")
+                # 打印详细错误！
+                print(f"[Dataset] ❌ ERROR loading {f}: {e}")
                 continue
-                
+        
         if len(shape_accum) == 0:
-            print("[Warning] No data found for stats. Using defaults.")
-            return {
-                'shape_mean': 0.0, 'shape_std': 1.0,
-                'ts_mean': 0.0, 'ts_std': 1.0
-            }
+            raise RuntimeError("[Dataset] ❌ CRITICAL: No valid data found for stats! Please check your data paths.")
 
-        # Stack and calculate
-        all_shapes = torch.stack(shape_accum)
-        all_ts = torch.stack(trans_scale_accum)
+        # 合并计算
+        all_shapes = torch.cat(shape_accum)
+        all_ts_log = torch.cat(trans_scale_log_accum)
         
         stats = {
             'shape_mean': all_shapes.mean().item(),
             'shape_std': all_shapes.std().item(),
-            'ts_mean': all_ts.mean().item(),
-            'ts_std': all_ts.std().item()
+            'ts_mean': all_ts_log.mean().item(),
+            'ts_std': all_ts_log.std().item()
         }
         
-        print(f"[Dataset] Stats computed:")
-        print(f"  Shape: Mean={stats['shape_mean']:.4f}, Std={stats['shape_std']:.4f}")
-        print(f"  T.Scale (Log): Mean={stats['ts_mean']:.4f}, Std={stats['ts_std']:.4f}")
+        # 强制检查：如果 Std 还是 1.0，说明没算对（除非数据本身就是N(0,1)，但这不可能）
+        if abs(stats['shape_std'] - 1.0) < 0.1:
+            print(f"[Dataset] ⚠️ WARNING: Calculated Shape Std is {stats['shape_std']:.4f}. Is your data ALREADY normalized?")
+        
+        print(f"[Dataset] ✅ STATS COMPUTED SUCCESS:")
+        print(f"  > Shape:    Mean={stats['shape_mean']:.4f}, Std={stats['shape_std']:.4f}")
+        print(f"  > T.Scale:  Mean={stats['ts_mean']:.4f},    Std={stats['ts_std']:.4f}")
+        print("-" * 50 + "\n")
         
         return stats
 
@@ -96,23 +89,9 @@ class SAM3DDistillDataset(Dataset):
     
     def visualize_sample(self, sample):
         if isinstance(sample, dict):
-            if 'rgb_image' in sample:
-                img = sample['rgb_image']
-            elif 'image' in sample:
-                img = sample['image']
-            else:
-                bs = sample.get('x_0', torch.zeros(1)).shape[0]
-                img = torch.zeros(bs, 3, self.image_size, self.image_size)
-        else:
-            img = sample
-            
-        if not isinstance(img, torch.Tensor):
-             return torch.zeros(1, 3, self.image_size, self.image_size)
-        
-        if img.ndim == 3:
-            img = img.unsqueeze(0)
-            
-        return {'input_image': img}
+            if 'rgb_image' in sample: return {'input_image': sample['rgb_image']}
+            elif 'image' in sample: return {'input_image': sample['image']}
+        return {'input_image': torch.zeros(1, 3, self.image_size, self.image_size)}
 
     def get_crop_bbox(self, mask_np):
         rows = np.any(mask_np, axis=1)
@@ -142,9 +121,7 @@ class SAM3DDistillDataset(Dataset):
 
         img = F.interpolate(img.unsqueeze(0), size=(self.image_size, self.image_size), mode='bilinear', align_corners=False).squeeze(0)
         mask = F.interpolate(mask.unsqueeze(0), size=(self.image_size, self.image_size), mode='nearest').squeeze(0)
-        
         img = img * mask + (1 - mask) 
-        
         return img, mask
 
     def __getitem__(self, idx):
@@ -152,7 +129,7 @@ class SAM3DDistillDataset(Dataset):
         gt_path = os.path.join(self.token_dir, token_filename)
         gt_data = torch.load(gt_path, map_location='cpu', weights_only=False)
         
-        # 1. Shape Normalization (New)
+        # 使用计算出的 Stats 进行归一化
         shape_raw = gt_data['shape'].squeeze(0).float()
         shape_norm = (shape_raw - self.stats['shape_mean']) / (self.stats['shape_std'] + 1e-6)
         
@@ -160,23 +137,21 @@ class SAM3DDistillDataset(Dataset):
         trans_token = gt_data['translation'].squeeze(0).float()
         scale_token = gt_data['scale'].squeeze(0).float()
         
-        # 2. Translation Scale Log-Normalization
+        # Translation Scale: Log + Norm + Clamp
         t_scale_raw = gt_data['translation_scale'].squeeze(0).float()
-        t_scale_log = torch.log(t_scale_raw + 1e-6)
-        t_scale_normalized = (t_scale_log - self.stats['ts_mean']) / (self.stats['ts_std'] + 1e-6)
+        t_scale_log = torch.log(torch.clamp(t_scale_raw, min=1e-4))
+        t_scale_norm = (t_scale_log - self.stats['ts_mean']) / (self.stats['ts_std'] + 1e-6)
+        t_scale_norm = torch.clamp(t_scale_norm, min=-5.0, max=5.0)
 
         file_id = os.path.splitext(token_filename)[0]
         img_name = f"{file_id}.png"
         img_path = os.path.join(self.image_dir, img_name)
         if not os.path.exists(img_path):
              jpg_path = img_path.replace(".png", ".jpg")
-             if os.path.exists(jpg_path):
-                 img_path = jpg_path
-             else:
-                 raise FileNotFoundError(f"Image not found: {img_path}")
+             if os.path.exists(jpg_path): img_path = jpg_path
+             else: raise FileNotFoundError(f"Image not found: {img_path}")
 
         pil_image = Image.open(img_path).convert("RGBA")
-        
         global_img_tensor, global_mask_tensor = self.preprocess_image_tensor(pil_image)
 
         mask_np = np.array(pil_image)[:, :, 3] > 128
@@ -190,11 +165,11 @@ class SAM3DDistillDataset(Dataset):
         local_img_tensor, local_mask_tensor = self.preprocess_image_tensor(crop_pil)
 
         return {
-            'x_0': shape_norm,  # Normalized Shape
+            'x_0': shape_norm, 
             '6drotation_normalized': rot_token,
             'translation': trans_token,
             'scale': scale_token,             
-            'translation_scale': t_scale_normalized, # Normalized T.Scale
+            'translation_scale': t_scale_norm, 
             'image': local_img_tensor,
             'mask': local_mask_tensor,
             'rgb_image': global_img_tensor,
